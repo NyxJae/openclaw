@@ -25,7 +25,7 @@ const result = await fetchWithWebToolsNetworkGuard({
   timeoutSeconds: params.timeoutSeconds,
   useEnvProxy: true,  // ← 新增
   lookupFn: params.lookupFn,
-  policy: ...,
+  policy: allowRfc2544BenchmarkRange ? { allowRfc2544BenchmarkRange } : undefined,
   init: { ... },
 });
 ```
