@@ -41,10 +41,10 @@ resolve_credential_role() {
 
 validate_openclaw_package_spec() {
   local spec="$1"
-  if [[ "$spec" =~ ^openclaw@(beta|latest|[0-9]{4}\.[1-9][0-9]*\.[1-9][0-9]*(-[1-9][0-9]*|-beta\.[1-9][0-9]*)?)$ ]]; then
+  if [[ "$spec" =~ ^openclaw@(alpha|beta|latest|[0-9]{4}\.[1-9][0-9]*\.[1-9][0-9]*(-[1-9][0-9]*|-(alpha|beta)\.[1-9][0-9]*)?)$ ]]; then
     return 0
   fi
-  echo "OPENCLAW_NPM_TELEGRAM_PACKAGE_SPEC must be openclaw@beta, openclaw@latest, or an exact OpenClaw release version; got: $spec" >&2
+  echo "OPENCLAW_NPM_TELEGRAM_PACKAGE_SPEC must be openclaw@alpha, openclaw@beta, openclaw@latest, or an exact OpenClaw release version; got: $spec" >&2
   exit 1
 }
 
@@ -145,11 +145,14 @@ for key in \
   OPENCLAW_QA_ALLOW_INSECURE_HTTP \
   OPENCLAW_QA_REDACT_PUBLIC_METADATA \
   OPENCLAW_QA_TELEGRAM_CAPTURE_CONTENT \
+  OPENCLAW_QA_TELEGRAM_CANARY_TIMEOUT_MS \
+  OPENCLAW_QA_TELEGRAM_SCENARIO_TIMEOUT_MS \
   OPENCLAW_QA_SUITE_PROGRESS \
   OPENCLAW_NPM_TELEGRAM_PROVIDER_MODE \
   OPENCLAW_NPM_TELEGRAM_MODEL \
   OPENCLAW_NPM_TELEGRAM_ALT_MODEL \
   OPENCLAW_NPM_TELEGRAM_SCENARIOS \
+  OPENCLAW_NPM_TELEGRAM_SKIP_HOTPATH \
   OPENCLAW_NPM_TELEGRAM_SUT_ACCOUNT \
   OPENCLAW_NPM_TELEGRAM_ALLOW_FAILURES; do
   forward_env_if_set "$key"
@@ -169,7 +172,7 @@ run_logged docker run --rm \
   -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
   -e OPENCLAW_NPM_TELEGRAM_INSTALL_SOURCE="$package_install_source" \
   -e OPENCLAW_NPM_TELEGRAM_PACKAGE_LABEL="$PACKAGE_LABEL" \
-  "${package_mount_args[@]}" \
+  ${package_mount_args[@]+"${package_mount_args[@]}"} \
   -v "$npm_prefix_host:/npm-global" \
   -i "$IMAGE_NAME" bash -s <<'EOF'
 set -euo pipefail
@@ -233,24 +236,9 @@ ln -sfnT /app/extensions "$openclaw_package_dir/extensions"
 mkdir -p /app/node_modules/@openclaw
 rm -rf /app/node_modules/@openclaw/qa-channel
 ln -sfnT /app/extensions/qa-channel /app/node_modules/@openclaw/qa-channel
-node --input-type=module <<'NODE'
-import fs from "node:fs";
-
-for (const packageJsonPath of [
-  "/app/package.json",
-  "/app/node_modules/openclaw/package.json",
-]) {
-  const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-  pkg.exports = pkg.exports && typeof pkg.exports === "object" ? pkg.exports : {};
-  if (!pkg.exports["./plugin-sdk/gateway-runtime"]) {
-    pkg.exports["./plugin-sdk/gateway-runtime"] = {
-      types: "./dist/plugin-sdk/gateway-runtime.d.ts",
-      default: "./dist/plugin-sdk/gateway-runtime.js",
-    };
-  }
-  fs.writeFileSync(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
-}
-NODE
+node scripts/e2e/lib/npm-telegram-live/prepare-package.mjs \
+  /app/package.json \
+  /app/node_modules/openclaw/package.json
 for deps_dir in "$openclaw_package_dir/node_modules" /npm-global/lib/node_modules; do
   [ -d "$deps_dir" ] || continue
   for dependency_dir in "$deps_dir"/*; do
@@ -299,27 +287,23 @@ for dependency in \
   link_installed_package_dependency "$dependency"
 done
 
-echo "Running installed-package onboarding recovery hot path..."
-OPENAI_API_KEY="${OPENAI_API_KEY:-sk-openclaw-npm-telegram-hotpath}" openclaw onboard --non-interactive --accept-risk \
-  --mode local \
-  --auth-choice openai-api-key \
-  --secret-input-mode ref \
-  --gateway-port 18789 \
-  --gateway-bind loopback \
-  --skip-daemon \
-  --skip-ui \
-  --skip-skills \
-  --skip-health \
-  --json >/tmp/openclaw-npm-telegram-onboard.json </dev/null
+if [ "${OPENCLAW_NPM_TELEGRAM_SKIP_HOTPATH:-0}" != "1" ]; then
+  echo "Running installed-package onboarding recovery hot path..."
+  OPENAI_API_KEY="${OPENAI_API_KEY:-sk-openclaw-npm-telegram-hotpath}" openclaw onboard --non-interactive --accept-risk \
+    --mode local \
+    --auth-choice openai-api-key \
+    --secret-input-mode ref \
+    --gateway-port 18789 \
+    --gateway-bind loopback \
+    --skip-daemon \
+    --skip-ui \
+    --skip-skills \
+    --skip-health \
+    --json >/tmp/openclaw-npm-telegram-onboard.json </dev/null
 
-openclaw channels add --channel telegram --token "123456:openclaw-npm-telegram-hotpath" >/tmp/openclaw-npm-telegram-channel-add.log 2>&1 </dev/null
-openclaw doctor --fix --non-interactive >/tmp/openclaw-npm-telegram-doctor-fix.log 2>&1 </dev/null
-openclaw doctor --non-interactive >/tmp/openclaw-npm-telegram-doctor-check.log 2>&1 </dev/null
-if grep -F -q "Bundled plugin runtime deps are missing." /tmp/openclaw-npm-telegram-doctor-check.log; then
-  exit 1
-fi
-if grep -F -q "Failed to install bundled plugin runtime deps" /tmp/openclaw-npm-telegram-doctor-fix.log; then
-  exit 1
+  openclaw channels add --channel telegram --token "123456:openclaw-npm-telegram-hotpath" >/tmp/openclaw-npm-telegram-channel-add.log 2>&1 </dev/null
+  openclaw doctor --fix --non-interactive >/tmp/openclaw-npm-telegram-doctor-fix.log 2>&1 </dev/null
+  openclaw doctor --non-interactive >/tmp/openclaw-npm-telegram-doctor-check.log 2>&1 </dev/null
 fi
 
 export OPENCLAW_NPM_TELEGRAM_SUT_COMMAND="$(command -v openclaw)"

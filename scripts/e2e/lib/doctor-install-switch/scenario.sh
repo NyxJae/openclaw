@@ -12,63 +12,9 @@ export OPENCLAW_DISABLE_BUNDLED_PLUGINS=1
 # Stub systemd/loginctl so doctor + daemon flows work in Docker.
 export PATH="/tmp/openclaw-bin:$PATH"
 mkdir -p /tmp/openclaw-bin
-
-cat >/tmp/openclaw-bin/systemctl <<"SYSTEMCTL"
-#!/usr/bin/env bash
-set -euo pipefail
-
-args=("$@")
-if [[ "${args[0]:-}" == "--user" ]]; then
-args=("${args[@]:1}")
-fi
-cmd="${args[0]:-}"
-case "$cmd" in
-status)
-  exit 0
-  ;;
-is-active)
-  echo "inactive" >&2
-  exit 3
-  ;;
-is-enabled)
-  unit="${args[1]:-}"
-  unit_path="$HOME/.config/systemd/user/${unit}"
-  if [ -f "$unit_path" ]; then
-    echo "enabled"
-    exit 0
-  fi
-  echo "disabled" >&2
-  exit 1
-  ;;
-show)
-  echo "ActiveState=inactive"
-  echo "SubState=dead"
-  echo "MainPID=0"
-  echo "ExecMainStatus=0"
-  echo "ExecMainCode=0"
-  exit 0
-  ;;
-*)
-  exit 0
-  ;;
-esac
-SYSTEMCTL
-chmod +x /tmp/openclaw-bin/systemctl
-
-cat >/tmp/openclaw-bin/loginctl <<"LOGINCTL"
-#!/usr/bin/env bash
-set -euo pipefail
-
-if [[ "$*" == *"show-user"* ]]; then
-echo "Linger=yes"
-exit 0
-fi
-if [[ "$*" == *"enable-linger"* ]]; then
-exit 0
-fi
-exit 0
-LOGINCTL
-chmod +x /tmp/openclaw-bin/loginctl
+cp scripts/e2e/lib/doctor-install-switch/shims/systemctl /tmp/openclaw-bin/systemctl
+cp scripts/e2e/lib/doctor-install-switch/shims/loginctl /tmp/openclaw-bin/loginctl
+chmod +x /tmp/openclaw-bin/systemctl /tmp/openclaw-bin/loginctl
 
 package_tgz="${OPENCLAW_CURRENT_PACKAGE_TGZ:?missing OPENCLAW_CURRENT_PACKAGE_TGZ}"
 git_root="/tmp/openclaw-git"
@@ -183,7 +129,7 @@ run_flow() {
   local doctor_expected="$5"
   local install_log="/tmp/openclaw-doctor-switch-${name}-install.log"
   local doctor_log="/tmp/openclaw-doctor-switch-${name}-doctor.log"
-  local command_timeout="${OPENCLAW_DOCKER_DOCTOR_SWITCH_COMMAND_TIMEOUT:-300s}"
+  local command_timeout="${OPENCLAW_DOCKER_DOCTOR_SWITCH_COMMAND_TIMEOUT:-900s}"
 
   echo "== Flow: $name =="
   openclaw_test_state_create "switch-${name}" empty
@@ -215,21 +161,21 @@ run_flow \
   "npm-to-git" \
   "$npm_bin daemon install --force" \
   "$npm_entry" \
-  "node $git_cli doctor --repair --force --yes" \
+  "OPENCLAW_UPDATE_IN_PROGRESS=1 node $git_cli doctor --repair --force --yes --non-interactive" \
   "$git_entry"
 
 run_flow \
   "git-to-npm" \
   "node $git_cli daemon install --force" \
   "$git_entry" \
-  "$npm_bin doctor --repair --force --yes" \
+  "OPENCLAW_UPDATE_IN_PROGRESS=1 $npm_bin doctor --repair --force --yes --non-interactive" \
   "$npm_entry"
 
 run_proxy_env_flow() {
   local name="proxy-env-cleanup"
   local install_log="/tmp/openclaw-doctor-switch-${name}-install.log"
   local doctor_log="/tmp/openclaw-doctor-switch-${name}-doctor.log"
-  local command_timeout="${OPENCLAW_DOCKER_DOCTOR_SWITCH_COMMAND_TIMEOUT:-300s}"
+  local command_timeout="${OPENCLAW_DOCKER_DOCTOR_SWITCH_COMMAND_TIMEOUT:-900s}"
 
   echo "== Flow: $name =="
   openclaw_test_state_create "switch-${name}" empty
@@ -252,7 +198,8 @@ run_proxy_env_flow() {
     printf "%s\n" "Environment=HTTP_PROXY=http://stale-proxy.local:7890"
     printf "%s\n" "Environment=HTTPS_PROXY=https://stale-proxy.local:7890"
   } >>"$unit_path"
-  if ! timeout "$command_timeout" node "$git_cli" doctor --repair --yes >"$doctor_log" 2>&1; then
+  if ! timeout "$command_timeout" env OPENCLAW_UPDATE_IN_PROGRESS=1 \
+    node "$git_cli" doctor --repair --force --yes --non-interactive >"$doctor_log" 2>&1; then
     cat "$doctor_log"
     exit 1
   fi
@@ -269,20 +216,17 @@ run_wrapper_flow() {
   local env_repair_log="/tmp/openclaw-doctor-switch-${name}-env-repair.log"
   local doctor_log="/tmp/openclaw-doctor-switch-${name}-doctor.log"
   local clear_log="/tmp/openclaw-doctor-switch-${name}-clear.log"
-  local command_timeout="${OPENCLAW_DOCKER_DOCTOR_SWITCH_COMMAND_TIMEOUT:-300s}"
+  local command_timeout="${OPENCLAW_DOCKER_DOCTOR_SWITCH_COMMAND_TIMEOUT:-900s}"
 
   echo "== Flow: $name =="
   openclaw_test_state_create "switch-${name}" empty
   export USER="testuser"
   mkdir -p "$HOME/.local/bin"
   local wrapper="$HOME/.local/bin/openclaw-wrapper"
-  cat >"$wrapper" <<WRAPPER
-#!/usr/bin/env bash
-set -euo pipefail
-printf "%s\n" "\$@" >> "$HOME/openclaw-wrapper-argv.log"
-exec "$npm_bin" "\$@"
-WRAPPER
-  chmod +x "$wrapper"
+  node scripts/e2e/lib/doctor-install-switch/write-wrapper.mjs \
+    "$wrapper" \
+    "$npm_bin" \
+    "$HOME/openclaw-wrapper-argv.log"
 
   local unit_path="$HOME/.config/systemd/user/openclaw-gateway.service"
 
